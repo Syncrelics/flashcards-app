@@ -3,3 +3,4 @@ chromadb
 pypdf
 sentence-transformers
 google-genai
+pydantic
