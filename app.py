@@ -8,15 +8,17 @@ from google import genai
 st.set_page_config(page_title="RAG Flashcards", page_icon="📚", layout="wide")
 st.title("📚 RAG Flashcard Generator")
 
-# 1. Initialize Vector Model and Database
+# 1. Initialize Vector Model and Chroma Client (Only cache the heavy resources)
 @st.cache_resource
 def load_ai_models():
     embed_model = SentenceTransformer("all-MiniLM-L6-v2")
     db_client = chromadb.PersistentClient(path="./chroma_db")
-    collection = db_client.get_or_create_collection(name="flashcard_notes")
-    return embed_model, db_client, collection
+    return embed_model, db_client
 
-model, chroma_client, collection = load_ai_models()
+model, chroma_client = load_ai_models()
+
+# Always get or create the collection dynamically to prevent stale collection IDs
+collection = chroma_client.get_or_create_collection(name="flashcard_notes")
 
 # 2. Session State Initialization
 if "flashcards" not in st.session_state:
@@ -30,7 +32,10 @@ st.sidebar.divider()
 st.sidebar.subheader("Database Management")
 
 if st.sidebar.button("🗑️ Reset Database & Clear Deck", type="secondary"):
-    chroma_client.delete_collection(name="flashcard_notes")
+    try:
+        chroma_client.delete_collection(name="flashcard_notes")
+    except Exception:
+        pass
     collection = chroma_client.get_or_create_collection(name="flashcard_notes")
     st.session_state.flashcards = []
     st.sidebar.success("Database and deck cleared!")
@@ -70,7 +75,9 @@ if topic and st.button("Generate Flashcards"):
     else:
         with st.spinner(f"Searching vectors and generating {num_cards} flashcards..."):
             topic_vector = model.encode([topic]).tolist()
-            results = collection.query(query_embeddings=topic_vector, n_results=5)
+            # Retrieve up to the available number of chunks or 5, whichever is smaller
+            query_k = min(collection.count(), 5)
+            results = collection.query(query_embeddings=topic_vector, n_results=query_k)
             context = "\n\n--- Next Chunk ---\n\n".join(results["documents"][0])
             
             client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
@@ -88,7 +95,7 @@ Example format:
 ]"""
             
             response = client.models.generate_content(
-                model="gemini-3.5-flash",
+                model="gemini-2.5-flash",
                 contents=prompt,
             )
             
@@ -96,6 +103,8 @@ Example format:
             
             if raw_text.startswith("```json"):
                 raw_text = raw_text.replace("```json", "", 1).replace("```", "").strip()
+            elif raw_text.startswith("```"):
+                raw_text = raw_text.replace("```", "", 1).replace("```", "").strip()
                 
             try:
                 new_cards = json.loads(raw_text)
@@ -104,7 +113,7 @@ Example format:
                     
                 st.success(f"Successfully generated {len(new_cards)} flashcards!")
             except json.JSONDecodeError:
-                st.error("Failed to parse the flashcards. The AI didn't format them correctly. Please try again.")
+                st.error("Failed to parse the flashcards format. Please try again.")
 
 # 6. Display Deck & Export
 if st.session_state.flashcards:
