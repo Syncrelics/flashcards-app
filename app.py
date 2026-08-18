@@ -4,11 +4,12 @@ import chromadb
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 from google import genai
+from google.genai import types
 
 st.set_page_config(page_title="RAG Flashcards", page_icon="📚", layout="wide")
 st.title("📚 RAG Flashcard Generator")
 
-# 1. Initialize Vector Model and Chroma Client (Only cache the heavy resources)
+# 1. Initialize Vector Model and Chroma Client
 @st.cache_resource
 def load_ai_models():
     embed_model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -16,8 +17,6 @@ def load_ai_models():
     return embed_model, db_client
 
 model, chroma_client = load_ai_models()
-
-# Always get or create the collection dynamically to prevent stale collection IDs
 collection = chroma_client.get_or_create_collection(name="flashcard_notes")
 
 # 2. Session State Initialization
@@ -75,46 +74,67 @@ if topic and st.button("Generate Flashcards"):
     else:
         with st.spinner(f"Searching vectors and generating {num_cards} flashcards..."):
             topic_vector = model.encode([topic]).tolist()
-            # Retrieve up to the available number of chunks or 5, whichever is smaller
             query_k = min(collection.count(), 5)
             results = collection.query(query_embeddings=topic_vector, n_results=query_k)
             context = "\n\n--- Next Chunk ---\n\n".join(results["documents"][0])
             
             client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
             
-            prompt = f"""You are an expert tutor. Based ONLY on the following context, create {num_cards} clear, high-yield flashcards.
+            prompt = f"""You are an expert tutor. Based ONLY on the following context, create exactly {num_cards} distinct flashcards about '{topic}'.
 
 Context:
 {context}
 
-You MUST output ONLY a valid JSON array of objects. Do not include markdown tags. Each object must have a "q" key for the question and an "a" key for the answer.
+Return a JSON array of objects where each object has:
+- "question": A specific question testing key concepts from the context.
+- "answer": A direct, accurate explanation based on the context.
+
 Example format:
 [
-  {{"q": "First question?", "a": "First answer."}},
-  {{"q": "Second question?", "a": "Second answer."}}
+  {{"question": "What is X?", "answer": "X is Y."}}
 ]"""
             
-            # Replaced deprecated gemini-2.5-flash with the working gemini-3.6-flash model
+            # Use native JSON mode for strict formatting
             response = client.models.generate_content(
                 model="gemini-3.6-flash",
                 contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                ),
             )
             
             raw_text = response.text.strip()
             
-            if raw_text.startswith("```json"):
-                raw_text = raw_text.replace("```json", "", 1).replace("```", "").strip()
-            elif raw_text.startswith("```"):
-                raw_text = raw_text.replace("```", "", 1).replace("```", "").strip()
-                
             try:
-                new_cards = json.loads(raw_text)
-                for card in new_cards:
-                    st.session_state.flashcards.append({"q": card["q"], "a": card["a"]})
+                parsed_data = json.loads(raw_text)
+                
+                # Handle cases where model wraps the array in an object like {"flashcards": [...]}
+                if isinstance(parsed_data, dict):
+                    # Find the first list value inside the dictionary
+                    card_list = next((v for v in parsed_data.values() if isinstance(v, list)), [])
+                elif isinstance(parsed_data, list):
+                    card_list = parsed_data
+                else:
+                    card_list = []
+
+                added_count = 0
+                for item in card_list:
+                    if isinstance(item, dict):
+                        # Support multiple common key variations
+                        q = item.get("question") or item.get("q") or item.get("Question") or item.get("front") or ""
+                        a = item.get("answer") or item.get("a") or item.get("Answer") or item.get("back") or ""
+                        
+                        if q.strip() and a.strip():
+                            st.session_state.flashcards.append({"q": q.strip(), "a": a.strip()})
+                            added_count += 1
+                
+                if added_count > 0:
+                    st.success(f"Successfully generated {added_count} flashcards!")
+                else:
+                    st.warning("Could not find enough specific information in the document for this topic. Try another keyword.")
                     
-                st.success(f"Successfully generated {len(new_cards)} flashcards!")
             except json.JSONDecodeError:
-                st.error("Failed to parse the flashcards format. Please try again.")
+                st.error("Failed to parse the flashcards. Please try again.")
 
 # 6. Display Deck & Export
 if st.session_state.flashcards:
