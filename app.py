@@ -94,8 +94,9 @@ Example format:
   {{"q": "Second question?", "a": "Second answer."}}
 ]"""
             
+            # Replaced deprecated gemini-2.5-flash with the working gemini-3.6-flash model
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.6-flash",
                 contents=prompt,
             )
             
