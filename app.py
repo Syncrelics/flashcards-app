@@ -9,7 +9,7 @@ from google.genai import types
 st.set_page_config(page_title="RAG Flashcards", page_icon="📚", layout="wide")
 st.title("📚 RAG Flashcard Generator")
 
-# 1. Initialize Vector Model and Chroma Client
+# 1. Initialize Vector Model and Database
 @st.cache_resource
 def load_ai_models():
     embed_model = SentenceTransformer("all-MiniLM-L6-v2")
@@ -48,6 +48,10 @@ if uploaded_file and st.button("Process Document"):
         reader = PdfReader(uploaded_file)
         all_text = " \n".join([page.extract_text() or "" for page in reader.pages])
         
+        if not all_text.strip():
+            st.error("⚠️ No text could be extracted from this PDF. Please check the file.")
+            st.stop()
+            
         words = all_text.split()
         chunks = [" ".join(words[i : i + 150]) for i in range(0, len(words), 120)]
         
@@ -64,7 +68,7 @@ st.divider()
 
 col1, col2 = st.columns([3, 1])
 with col1:
-    topic = st.text_input("2. What specific concept do you want to study?")
+    topic = st.text_input("2. What specific concept do you want to study?", placeholder="e.g., Lucknow Pact or Home Rule League")
 with col2:
     num_cards = st.slider("Number of cards", min_value=1, max_value=10, value=3)
 
@@ -85,16 +89,12 @@ if topic and st.button("Generate Flashcards"):
 Context:
 {context}
 
-Return a JSON array of objects where each object has:
-- "question": A specific question testing key concepts from the context.
-- "answer": A direct, accurate explanation based on the context.
-
-Example format:
+Return a valid JSON array of objects. Each object must have a "question" field and an "answer" field.
+Example:
 [
-  {{"question": "What is X?", "answer": "X is Y."}}
+  {{"question": "When did Jinnah join the Muslim League?", "answer": "In 1913, on the condition of loyalty to the larger national cause."}}
 ]"""
             
-            # Use native JSON mode for strict formatting
             response = client.models.generate_content(
                 model="gemini-3.6-flash",
                 contents=prompt,
@@ -105,12 +105,18 @@ Example format:
             
             raw_text = response.text.strip()
             
+            # Optional debug expander
+            with st.expander("🔍 Debug: Inspect Retrieved Context & Raw AI Output"):
+                st.write("**Retrieved Context from ChromaDB:**")
+                st.text(context)
+                st.write("**Raw Response from Gemini:**")
+                st.code(raw_text, language="json")
+
             try:
                 parsed_data = json.loads(raw_text)
                 
-                # Handle cases where model wraps the array in an object like {"flashcards": [...]}
+                # If wrapped in a dictionary, extract the inner list
                 if isinstance(parsed_data, dict):
-                    # Find the first list value inside the dictionary
                     card_list = next((v for v in parsed_data.values() if isinstance(v, list)), [])
                 elif isinstance(parsed_data, list):
                     card_list = parsed_data
@@ -120,28 +126,44 @@ Example format:
                 added_count = 0
                 for item in card_list:
                     if isinstance(item, dict):
-                        # Support multiple common key variations
-                        q = item.get("question") or item.get("q") or item.get("Question") or item.get("front") or ""
-                        a = item.get("answer") or item.get("a") or item.get("Answer") or item.get("back") or ""
+                        # Match any casing or alternate key names
+                        q = (
+                            item.get("question")
+                            or item.get("Question")
+                            or item.get("q")
+                            or item.get("Q")
+                            or item.get("front")
+                            or ""
+                        )
+                        a = (
+                            item.get("answer")
+                            or item.get("Answer")
+                            or item.get("a")
+                            or item.get("A")
+                            or item.get("back")
+                            or ""
+                        )
                         
-                        if q.strip() and a.strip():
-                            st.session_state.flashcards.append({"q": q.strip(), "a": a.strip()})
+                        if str(q).strip() and str(a).strip():
+                            st.session_state.flashcards.append({"q": str(q).strip(), "a": str(a).strip()})
                             added_count += 1
                 
                 if added_count > 0:
-                    st.success(f"Successfully generated {added_count} flashcards!")
+                    st.success(f"Successfully generated {added_count} flashcard(s)!")
                 else:
-                    st.warning("Could not find enough specific information in the document for this topic. Try another keyword.")
+                    st.warning("No matching information was found in the text for that topic. Try a broader topic like 'Lucknow' or 'Bombay'.")
                     
             except json.JSONDecodeError:
-                st.error("Failed to parse the flashcards. Please try again.")
+                st.error("Failed to parse JSON response. Please try again.")
 
-# 6. Display Deck & Export
-if st.session_state.flashcards:
-    st.subheader(f"Your Deck ({len(st.session_state.flashcards)} cards)")
+# 6. Display Deck & Export (Only display non-empty cards)
+valid_cards = [c for c in st.session_state.flashcards if c.get("q") and c.get("a")]
+
+if valid_cards:
+    st.subheader(f"Your Deck ({len(valid_cards)} cards)")
     
     anki_export_text = ""
-    for card in st.session_state.flashcards:
+    for card in valid_cards:
         st.info(f"Q:\n\nA:")
         clean_q = card['q'].replace('\n', ' ')
         clean_a = card['a'].replace('\n', '<br>')
