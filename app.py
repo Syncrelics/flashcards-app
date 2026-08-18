@@ -1,3 +1,4 @@
+import json
 import streamlit as st
 import chromadb
 from pypdf import PdfReader
@@ -56,44 +57,54 @@ if uploaded_file and st.button("Process Document"):
 
 # 5. Flashcard Generation
 st.divider()
-topic = st.text_input("2. What specific concept do you want a flashcard for?")
 
-if topic and st.button("Generate Flashcard"):
+col1, col2 = st.columns([3, 1])
+with col1:
+    topic = st.text_input("2. What specific concept do you want to study?")
+with col2:
+    num_cards = st.slider("Number of cards", min_value=1, max_value=10, value=3)
+
+if topic and st.button("Generate Flashcards"):
     if collection.count() == 0:
         st.warning("Your database is empty. Please upload and process a PDF first.")
     else:
-        with st.spinner("Searching vectors and consulting Gemini..."):
+        with st.spinner(f"Searching vectors and generating {num_cards} flashcards..."):
             topic_vector = model.encode([topic]).tolist()
-            results = collection.query(query_embeddings=topic_vector, n_results=2)
+            results = collection.query(query_embeddings=topic_vector, n_results=5)
             context = "\n\n--- Next Chunk ---\n\n".join(results["documents"][0])
             
-            # Fetch API key securely from Streamlit Secrets
             client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
             
-            prompt = f"""You are an expert tutor. Based ONLY on the following context, create a clear, high-yield flashcard.
+            prompt = f"""You are an expert tutor. Based ONLY on the following context, create {num_cards} clear, high-yield flashcards.
 
 Context:
 {context}
 
-Format your output exactly as follows:
-Q: [Question]
-A: [Answer]"""
+You MUST output ONLY a valid JSON array of objects. Do not include markdown tags. Each object must have a "q" key for the question and an "a" key for the answer.
+Example format:
+[
+  {{"q": "First question?", "a": "First answer."}},
+  {{"q": "Second question?", "a": "Second answer."}}
+]"""
             
-            # Use Gemini's fast, free model
             response = client.models.generate_content(
                 model="gemini-3.5-flash",
                 contents=prompt,
             )
             
-            raw_text = response.text
+            raw_text = response.text.strip()
             
-            if "Q:" in raw_text and "A:" in raw_text:
-                q_part = raw_text.split("A:")[0].replace("Q:", "").strip()
-                a_part = raw_text.split("A:")[1].strip()
-                st.session_state.flashcards.append({"q": q_part, "a": a_part})
-                st.success("Flashcard generated and saved!")
-            else:
-                st.error("Failed to parse the flashcard format. Please try again.")
+            if raw_text.startswith("```json"):
+                raw_text = raw_text.replace("```json", "", 1).replace("```", "").strip()
+                
+            try:
+                new_cards = json.loads(raw_text)
+                for card in new_cards:
+                    st.session_state.flashcards.append({"q": card["q"], "a": card["a"]})
+                    
+                st.success(f"Successfully generated {len(new_cards)} flashcards!")
+            except json.JSONDecodeError:
+                st.error("Failed to parse the flashcards. The AI didn't format them correctly. Please try again.")
 
 # 6. Display Deck & Export
 if st.session_state.flashcards:
