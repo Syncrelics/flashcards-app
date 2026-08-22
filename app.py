@@ -1,5 +1,6 @@
 import json
 import time
+import os
 import streamlit as st
 import chromadb
 from pypdf import PdfReader
@@ -10,6 +11,24 @@ from pydantic import BaseModel, Field
 
 st.set_page_config(page_title="RAG Flashcards", page_icon="📚", layout="wide")
 st.title("📚 RAG Flashcard Generator & Tutor")
+
+# --- HISTORY SYSTEM ---
+HISTORY_FILE = "flashcard_history.json"
+
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            return []
+    return []
+
+def save_to_history(new_cards):
+    history = load_history()
+    history.extend(new_cards)
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history, f, indent=4)
 
 # 1. 3D CSS Injection
 st.markdown("""
@@ -97,18 +116,6 @@ if "flashcards" not in st.session_state:
 # 5. Sidebar Configuration
 st.sidebar.header("Settings")
 st.sidebar.info("Generation is powered by Gemini API (Free Tier).")
-st.sidebar.divider()
-st.sidebar.subheader("Database Management")
-
-if st.sidebar.button("🗑️ Reset Database & Clear Deck", type="secondary"):
-    try:
-        chroma_client.delete_collection(name="flashcard_notes")
-    except Exception:
-        pass
-    collection = chroma_client.get_or_create_collection(name="flashcard_notes")
-    st.session_state.flashcards = []
-    st.sidebar.success("Database and deck cleared!")
-    st.rerun()
 
 # 6. PDF Upload & Processing
 uploaded_file = st.sidebar.file_uploader("1. Upload a PDF to study", type="pdf")
@@ -134,7 +141,7 @@ if uploaded_file and st.sidebar.button("Process Document"):
         st.sidebar.success(f"Successfully processed {len(chunks)} chunks!")
 
 # --- APP TABS ---
-tab_gen, tab_study = st.tabs(["🗂️ Flashcard Generator", "🎓 Interactive Study Mode"])
+tab_gen, tab_study, tab_history = st.tabs(["🗂️ Flashcard Generator", "🎓 Interactive Study Mode", "🕰️ Flashcard History"])
 
 with tab_gen:
     st.header("Generate New Flashcards")
@@ -191,16 +198,20 @@ Context:
                         card_list = parsed_data.get("flashcards", [])
                         
                         added_count = 0
+                        new_valid_cards = []
                         for item in card_list:
                             q = item.get("question", "")
                             a = item.get("answer", "")
                             
                             if str(q).strip() and str(a).strip():
-                                st.session_state.flashcards.append({"q": str(q).strip(), "a": str(a).strip()})
+                                card_obj = {"q": str(q).strip(), "a": str(a).strip()}
+                                st.session_state.flashcards.append(card_obj)
+                                new_valid_cards.append(card_obj)
                                 added_count += 1
                         
                         if added_count > 0:
-                            st.success(f"Successfully generated {added_count} flashcard(s)!")
+                            save_to_history(new_valid_cards)
+                            st.success(f"Successfully generated and saved {added_count} flashcard(s) to history!")
                         else:
                             st.warning("No matching information was found in the text for that topic. Try a broader topic.")
                             
@@ -211,7 +222,7 @@ Context:
     valid_cards = [c for c in st.session_state.flashcards if c.get("q") and c.get("a")]
 
     if valid_cards:
-        st.subheader(f"Your Deck ({len(valid_cards)} cards)")
+        st.subheader(f"Current Session Deck ({len(valid_cards)} cards)")
         cols = st.columns(3)
         anki_export_text = ""
         
@@ -240,9 +251,9 @@ Context:
         
         st.divider()
         st.download_button(
-            label="📥 Download for Anki (.txt)",
+            label="📥 Download Current Session for Anki (.txt)",
             data=anki_export_text,
-            file_name="rag_flashcards.txt",
+            file_name="rag_flashcards_session.txt",
             mime="text/plain"
         )
 
@@ -254,7 +265,6 @@ with tab_study:
     if not valid_cards:
         st.info("Your deck is currently empty. Go to the Flashcard Generator tab to create some cards first!")
     else:
-        # Create a dictionary to map a clean label to the actual card data
         card_options = {f"Card {i+1}: {c['q'][:60]}..." : c for i, c in enumerate(valid_cards)}
         selected_label = st.selectbox("Select a flashcard to study:", options=list(card_options.keys()))
         current_card = card_options[selected_label]
@@ -293,3 +303,48 @@ Evaluate the student's answer. Give a score out of 10 and a brief, encouraging f
                             
                     except Exception as e:
                         st.error("Failed to grade the answer. Google's API might be busy. Please try again.")
+
+with tab_history:
+    st.header("🕰️ Flashcard History")
+    st.info("These are all the flashcards you have generated across all your study sessions.")
+    
+    history_cards = load_history()
+    
+    if not history_cards:
+        st.write("Your history is completely empty. Generate some flashcards first!")
+    else:
+        cols = st.columns(3)
+        anki_export_all = ""
+        
+        for idx, card in enumerate(history_cards):
+            # Formats the text for Anki export
+            clean_q = card['q'].replace('\n', ' ')
+            clean_a = card['a'].replace('\n', '<br>')
+            anki_export_all += f"{clean_q}\t{clean_a}\n"
+            
+            # Formats the text for 3D card display
+            html_q = card['q'].replace('<', '&lt;').replace('>', '&gt;')
+            html_a = card['a'].replace('\n', '<br>').replace('<', '&lt;').replace('>', '&gt;')
+            
+            html_code = f"""
+            <div class="flip-card">
+              <div class="flip-card-inner">
+                <div class="flip-card-front">
+                  <h3>{html_q}</h3>
+                </div>
+                <div class="flip-card-back">
+                  <p>{html_a}</p>
+                </div>
+              </div>
+            </div>
+            """
+            with cols[idx % 3]:
+                st.markdown(html_code, unsafe_allow_html=True)
+                
+        st.divider()
+        st.download_button(
+            label="📥 Download Full History for Anki (.txt)",
+            data=anki_export_all,
+            file_name="full_rag_flashcards_history.txt",
+            mime="text/plain"
+        )
